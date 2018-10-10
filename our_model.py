@@ -125,15 +125,21 @@ use the viterbi algorithm for predicting NER tag for sequence of tokens
 inputs: test_seq (list of tokens), word_tag_prob(dict), tag_bigram (dict)
 output: list of tags
 """
-def viterbi_hmm(test_seq, training_df, tag_bigram):
-    word_tag_prob, tag_counts = get_word_tag_prob(training_df)
+# def viterbi_hmm(test_seq, training_df, tag_bigram):
+def viterbi_hmm(test_seq, word_tag_prob, tag_counts, tag_bigram):
+    # word_tag_prob, tag_counts = get_word_tag_prob(training_df)
     tags = list(tag_counts.keys())
+    # print("the tags are ", tags)
     n = len(test_seq)
-    print("n is ", n)
+    # print("n is ", n)
     scores = np.zeros([len(tags), n]) # dp table
     backpointers = np.zeros([len(tags), n]) 
     for i in range(len(tags)): # initialization
-        scores[i][0] = tag_counts[tags[i]]/ np.sum(tag_counts.values())
+        tag_prob = tag_counts[tags[i]] / np.sum(tag_counts.values())
+        if test_seq[0] in word_tag_prob[tags[i]]:
+            scores[i][0] = tag_prob * word_tag_prob[tags[i]][test_seq[0]]
+        else: 
+            scores[i][0] = tag_prob * word_tag_prob[tags[i]]["UNK"]
         backpointers[i][0] = 0 
     for word_idx in range(1, n): # dp step
         for tag_idx in range(len(tags)):
@@ -151,17 +157,13 @@ def viterbi_hmm(test_seq, training_df, tag_bigram):
                 curr = scores[prev_tag][word_idx-1]*transition*lexical
                 if (curr > tmp_max):
                     tmp_max = curr
-                    max_idx = tag_idx
+                    max_idx = prev_tag
             scores[tag_idx][word_idx] = tmp_max
             assert max_idx != -1
+            
             backpointers[tag_idx][word_idx] = max_idx
     # now figure out the maximum path (i.e. predicted tags)
     tag_preds = ["" for i in range(n)]
-    # print(scores)
-    # print(last_scores.shape)
-    # print(np.argmax(scores, axis = 0))
-    # print("back pointers")
-    # print(backpointers)
     max_tag_idx = np.argmax(scores, axis = 0)[-1]
     while (n > 0): 
         # print("max tag", max_tag_idx)
@@ -175,10 +177,81 @@ TODO: use MEMM for predicting tag labels
 """
 def viterbi_memm(test_seq, training_df, tag_bigram):
     n = len(test_seq)
-
-
     tag_preds = ["" for i in range(n)]
     return tag_preds
+
+# take the file name and return a df with raw and unknown tokens and pos tags
+def read_test(test_filename):
+    raw_df = read_data(test_filename)
+    unknown_cols = ["tokens", "pos"]
+    res_df = tokensWithUnk(raw_df, unknown_cols)
+    
+    return res_df
+
+"""
+returns a dictionary that can be used to generate the submission file
+"""
+def predict_test(model, training_df, test_filename):
+    test = read_test(test_filename)
+    ner_bigram = get_bigram(training_df, "ner_unknown")
+    word_tag_prob, tag_counts = get_word_tag_prob(training_df)
+    indices = []
+    preds = []
+    print("getting predictions......")
+    for i in range(len(test)):
+        test_tokens = test.loc[i, "tokens_unknown"]
+        indices += test.loc[i, "ner"][0].split(" ")
+        # print(test.loc[i, "ner"][0].split(" "))
+        # print(test_tokens)
+        # assert len(test.loc[i, "ner"]) == len(test_tokens)
+        if (model == "hmm"):
+            curr_preds = viterbi_hmm(test_tokens, word_tag_prob, tag_counts, ner_bigram)
+        else: #TODO: fill in other options for modeling
+            return
+        # remove the BIOs
+        for i in range(len(curr_preds)):
+            if "-" in curr_preds[i]:
+                tmp = curr_preds[i].index("-")
+                curr_preds[i] = curr_preds[i][(tmp+1):len(curr_preds[i])]
+        preds += curr_preds
+    # reformat the preds for submission
+    print(len(indices), len(preds))
+    assert len(indices) == len(preds)
+    
+    print("prediction done, reformatting output")
+    submission = {"LOC":[], "PER":[], "ORG":[], "MISC":[]}
+    i = 0
+    while i < len(indices):
+        curr_pred = preds[i]
+        if curr_pred in submission.keys(): # NER tag is not O
+            if i < len(indices) -1: 
+                if preds[i+1] == curr_pred:
+                    tmp = str(i+1) + "-" + str(i+2)
+                    i = i+2
+                else:
+                    tmp = str(i+1) + "-" + str(i+1)
+                    i = i+1
+            else: # it's the last item in list
+                tmp = str(i+1) + "-" + str(i+1)
+            submission[curr_pred].append(tmp)
+        else: # tag is O, move on to next item
+            i += 1
+    return submission
+
+# take the submission dictionary and convert it to a txt file with the inputted filename
+def get_submission(submission, filename):
+    print("generating submission file....")
+    file = open("/Users/JanicaTang/Desktop/NLP/" + filename, "w")
+    tags = ["ORG", "MISC", "PER", "LOC"]
+    file.write("Type,Prediction\n")
+    for i in range(len(tags)):
+
+        tmp = " ".join(submission[tags[i]])
+        file.write(tags[i] + "," + tmp + "\n")
+    file.close()
+
+# file = open("/Users/JanicaTang/Desktop/NLP/" + "submission.txt", "w")
+
 
 #TODO: split data into 80% training and 20% validation
 def split_training(tokens, pos, ner):
@@ -188,35 +261,34 @@ def split_training(tokens, pos, ner):
     return ratio
 
 print("converting txt file to dataframe......")
-raw = read_data("train.txt")
-# print("tokens")
-# print(type(raw.loc[0, "tokens"]))
-# print("POS")
-# print(raw.loc[0:10, "pos"])
-# print("NER")
-# print(raw.loc[0:10, "ner"])
 
-unknown_cols = ["ner", "tokens"]
-raw_with_unknown = tokensWithUnk(raw, unknown_cols)
-print(type(raw_with_unknown.loc[0, "tokens_unknown"]))
-raw_with_unknown.to_pickle("raw_with_unknown.pkl")
+"""
+INDIVIDUAL LINE TESTS
+"""
+
+# raw = read_data("train.txt")
+# unknown_cols = ["ner", "tokens", "pos"]
+# raw_with_unknown = tokensWithUnk(raw, unknown_cols)
+# print(type(raw_with_unknown.loc[0, "tokens_unknown"]))
+# raw_with_unknown.to_pickle("raw_with_unknown.pkl")
 
 # raw_with_unknown = strip_bio(raw, "ner")
-
+raw_with_unknown = pd.read_pickle("raw_with_unknown.pkl")
 # print(raw_with_unknown.head())
-print("dealt with unknown words in", unknown_cols, " columns and the current columns in the dataframe are:", raw_with_unknown.columns)
+# print(type(raw_with_unknown.loc[0, "tokens"]))
+# print("dealt with unknown words in", unknown_cols, " columns and the current columns in the dataframe are:", raw_with_unknown.columns)
 
 # print("now getting the bigram for NER tags...")
 # ner_bigrams = get_bigram(raw_with_unknown, "ner_unknown")
 
 # test_tokens = "South	African	fast	bowler	Shaun	Pollock	concluded	his	Warwickshire	career	with	a	flourish".split("\t")
 # test2 = "Yorkshire	captain	David	Byas	completed	his	third	Sunday	league	century	as	his	side	swept	clear	at	the	top	of	the	table	,	reaching	a	career	best	111	not	out	against	Lancashire	.".split("\t")
+# pos_test = "NNP	NN	NNP	NNP	VBD	PRP$	JJ	NNP	NN	NN	IN	PRP$	NN	VBD	JJ	IN	DT	NN	IN	DT	NN	,	VBG	DT	NN	JJS	CD	RB	RP	IN	NNP	.".split("\t")
 # print("the test tokens are ")
-# print(test2)
+# print(test_tokens)
 
 # print("now predict with viterbi hmm......")
-# test_res = viterbi_hmm("China and Spain", raw_with_unknown, ner_bigrams)
-# print(viterbi_hmm("Donald Trump", raw_with_unknown, ner_bigrams))
+# test_res = viterbi_hmm(test_tokens, raw_with_unknown, ner_bigrams)
 # print("the predicted NER tags are")
 # print(test_res)
 
@@ -227,3 +299,10 @@ print("dealt with unknown words in", unknown_cols, " columns and the current col
 # print(b)
 # print(a[:,2])
 # print(np.argmax(a[:,2]))
+
+
+"""
+generate test submission files
+"""
+submission_dict = predict_test("hmm", raw_with_unknown, "test.txt")
+get_submission(submission_dict, "submission.txt")
