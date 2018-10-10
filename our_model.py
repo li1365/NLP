@@ -3,7 +3,7 @@ import pandas as pd
 import math, scipy
 import random, string, copy
 
-#take the txt file, return dictionary with three keys: tokens, POS tags and NER tags
+# take the txt file, return dictionary with three keys: tokens, POS tags and NER tags
 def read_data(filename):
     lines = open(filename, "r").read().split("\r\n")
     tokens = []
@@ -182,10 +182,10 @@ def viterbi_memm(test_seq, training_df, tag_bigram):
 
 # take the file name and return a df with raw and unknown tokens and pos tags
 def read_test(test_filename):
+    print("reading test file...")
     raw_df = read_data(test_filename)
     unknown_cols = ["tokens", "pos"]
     res_df = tokensWithUnk(raw_df, unknown_cols)
-    
     return res_df
 
 """
@@ -201,9 +201,6 @@ def predict_test(model, training_df, test_filename):
     for i in range(len(test)):
         test_tokens = test.loc[i, "tokens_unknown"]
         indices += test.loc[i, "ner"][0].split(" ")
-        # print(test.loc[i, "ner"][0].split(" "))
-        # print(test_tokens)
-        # assert len(test.loc[i, "ner"]) == len(test_tokens)
         if (model == "hmm"):
             curr_preds = viterbi_hmm(test_tokens, word_tag_prob, tag_counts, ner_bigram)
         else: #TODO: fill in other options for modeling
@@ -217,8 +214,6 @@ def predict_test(model, training_df, test_filename):
     # reformat the preds for submission
     print(len(indices), len(preds))
     assert len(indices) == len(preds)
-    
-    print("prediction done, reformatting output")
     submission = {"LOC":[], "PER":[], "ORG":[], "MISC":[]}
     i = 0
     while i < len(indices):
@@ -306,3 +301,4 @@ generate test submission files
 """
 submission_dict = predict_test("hmm", raw_with_unknown, "test.txt")
 get_submission(submission_dict, "submission.txt")
+print("current submission file is completed, saved in submission.txt")
