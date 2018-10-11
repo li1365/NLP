@@ -72,13 +72,16 @@ def get_bigram(df, col_name, k = 0.01):
                 bigram_dict[sentence[i]][sentence[i+1]] = 1 + k
     print("keys are ", bigram_dict.keys())
     for key in bigram_dict.keys():
-        curr_total = np.sum(bigram_dict[key].values())
+        curr_total = sum(bigram_dict[key].values())
+        print(curr_total)
         bigram_dict[key]["UNK"] = k # deal with unseen bigrams
         # compute the conditional prob. 
         for word in bigram_dict[key].keys(): 
+            print(bigram_dict[key][word])
             bigram_dict[key][word] = bigram_dict[key][word]/curr_total
     return bigram_dict
 
+# a = 
 
 """
 get P(word|tag) dictionary, tag can be POS or NER tags, with default add-k smoothing k - 0.01
@@ -130,14 +133,14 @@ def viterbi_hmm(test_seq, word_tag_prob, tag_counts, tag_bigram):
     print("tag counts are ")
     print(tag_counts)
     for i in range(len(tags)): # initialization
-        tag_prob = tag_counts[tags[i]] / np.sum(tag_counts.values())
+        tag_prob = tag_counts[tags[i]] / sum(tag_counts.values())
         print("current tag prob", tag_prob)
         if test_seq[0] in word_tag_prob[tags[i]]:
-            scores[i][0] = tag_prob * word_tag_prob[tags[i]][test_seq[0]]/ np.sum(word_tag_prob[tags[i]].values())
+            scores[i][0] = tag_prob * word_tag_prob[tags[i]][test_seq[0]]/ sum(word_tag_prob[tags[i]].values())
             print("seen score")
             print(scores[i][0])
         else: 
-            scores[i][0] = tag_prob * word_tag_prob[tags[i]]["UNK"]/np.sum(word_tag_prob[tags[i]].values())
+            scores[i][0] = tag_prob * word_tag_prob[tags[i]]["UNK"]/sum(word_tag_prob[tags[i]].values())
             print("unknown score")
             print(scores[i][0])
         backpointers[i][0] = 0 
@@ -151,9 +154,9 @@ def viterbi_hmm(test_seq, word_tag_prob, tag_counts, tag_bigram):
                 else: # deal with unseen tag bigrams
                     transition = tag_bigram[tags[prev_tag]]["UNK"] 
                 if test_seq[word_idx] in word_tag_prob[tags[tag_idx]]:
-                    lexical = word_tag_prob[tags[tag_idx]][test_seq[word_idx]] / np.sum(word_tag_prob[tags[tag_idx]].values())
+                    lexical = word_tag_prob[tags[tag_idx]][test_seq[word_idx]] / sum(word_tag_prob[tags[tag_idx]].values())
                 else: # FIXME: distinguish between unseen pairs and unknown words???
-                    lexical = word_tag_prob[tags[tag_idx]]["UNK"] / np.sum(word_tag_prob[tags[tag_idx]].values())
+                    lexical = word_tag_prob[tags[tag_idx]]["UNK"] / sum(word_tag_prob[tags[tag_idx]].values())
                 curr = scores[prev_tag][word_idx-1]*transition*lexical
                 if (curr > tmp_max):
                     tmp_max = curr
