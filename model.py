@@ -205,17 +205,29 @@ def get_memm_train(df):
         assert len(curr_poss) == len(curr_words)
         for i in range(len(curr_poss)):
             features = dict()
-            features['curr_pos'] = curr_poss[i]
-            features['curr_word'] = curr_words[i]
+            if i == 0:
+                features['curr_pos'] = curr_poss[i]
+                features['curr_word'] = curr_words[i]
+                features['prev_word'] = "init"
+                features['prev_pos'] = "init"
+                features['prev_ner'] = "init"
+            else:
+                features['curr_pos'] = curr_poss[i]
+                features['curr_word'] = curr_words[i]
+                features['prev_word'] = curr_words[i-1]
+                features['prev_pos'] = curr_poss[i-1]
+                features['prev_ner'] = curr_ner[i-1]
             ner = curr_ner[i]
             trainX.append((features, ner))
     return trainX
 
-def get_memm_features(word, pos, ner):
+def get_memm_features(word, pos, prev_word, prev_pos, ner):
     features = dict()
     features['curr_word'] = word
     features['curr_pos'] = pos
     features['prev_ner'] = ner
+    features['prev_word'] = prev_word
+    features['prev_pos'] = prev_pos
     return features
 
 def viterbi_memm(word_seq, pos_seq):
@@ -227,7 +239,7 @@ def viterbi_memm(word_seq, pos_seq):
     w1 = word_seq[0]
     p1 = pos_seq[0]
     for i in range(len(tags)): # initialization
-        probability = maxent_classifier.prob_classify(get_memm_features(w1,p1, "init" ))
+        probability = maxent_classifier.prob_classify(get_memm_features(w1,p1,"init", "init", "init" ))
         posterior = float(probability.prob(tags[i]))
         scores[i][0] = posterior
         backpointers[i][0] = 0
@@ -236,7 +248,7 @@ def viterbi_memm(word_seq, pos_seq):
             tmp_max = 0
             max_idx = -1
             for prev_tag in range(len(tags)):
-                probability = maxent_classifier.prob_classify(get_memm_features(word_seq[word_idx], pos_seq[word_idx], tags[prev_tag]))
+                probability = maxent_classifier.prob_classify(get_memm_features(word_seq[word_idx], pos_seq[word_idx], word_seq[word_idx-1], pos_seq[word_idx-1], tags[prev_tag]))
                 posterior = float(probability.prob(tags[tag_idx]))
                 curr = scores[prev_tag][word_idx-1] * posterior
                 if (curr > tmp_max):
@@ -281,18 +293,18 @@ if __name__ == "__main__":
     ###################################
 
     ### train maxent classifier     ###
-    #f = open("my_classifier.pickle", "wb")
-    #trainX = get_memm_train(raw_withoutBIO)
-    #maxent_classifier = MaxentClassifier.train(trainX, max_iter=10)
-    #pickle.dump(maxent_classifier , f)
-    #f.close()
-    #print("classifier saved in picklefile")
+    f = open("my_classifier.pickle", "wb")
+    trainX = get_memm_train(raw_withoutBIO)
+    maxent_classifier = MaxentClassifier.train(trainX, max_iter=10)
+    pickle.dump(maxent_classifier , f)
+    f.close()
+    print("classifier saved in picklefile")
 
     ### load saved classifier from pickle
-    f = open('my_classifier.pickle', 'rb')
-    maxent_classifier = pickle.load(f)
-    f.close()
-    print("saved classifier has been loaded")
+    #f = open('my_classifier.pickle', 'rb')
+    #maxent_classifier = pickle.load(f)
+    #f.close()
+    #print("saved classifier has been loaded")
 
     word_tokens = "South	African	fast	bowler	Shaun	Pollock	concluded	his	Warwickshire	career	with	a	flourish	on	Sunday	by	taking	the	final	three	wickets	during	the	county	's	Sunday	league	victory	over	Worcestershire	.".split("\t")
     pos_tokens = "JJ	JJ	JJ	NN	NNP	NNP	VBD	PRP$	NNP	NN	IN	DT	VB	IN	NNP	IN	VBG	DT	JJ	CD	NNS	IN	DT	NN	POS	NNP	NN	NN	IN	NNP	.".split("\t")
