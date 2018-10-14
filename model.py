@@ -24,6 +24,16 @@ def read_data(filename):
     res = pd.DataFrame({"tokens": tokens, "pos": pos, "ner": ner})
     return res
 
+def concat_rows(df):
+    cols = list(df.columns)
+    res = dict()
+    for col in cols:
+        res[col] = []
+    for i in range(len(df)):
+        for col in cols:
+            res[col] += df.loc[i, col]
+    return pd.DataFrame(res)
+
 # generate the UNIGRAM dictionary with add-k smoothing for one column in dataframe: df[col_name]
 def uniGram(df, col_name, k = 0.01):
     unigram_dict = {}
@@ -34,7 +44,7 @@ def uniGram(df, col_name, k = 0.01):
                 unigram_dict[token] += 1
             else:
                 unigram_dict[token] = 1 + k
-    total = len(unigram_dict)
+    total = sum(unigram_dict.values())
     for word in unigram_dict.keys():
         unigram_dict[word] = unigram_dict[word]/total
     return unigram_dict
@@ -92,6 +102,7 @@ def get_interpolation(words, unigram, bigram, trigram, lambdas = [0.2, 0.3, 0.5]
             res = bi *(lambdas[1] + lambdas[2]) + uni* lambdas[0] # use bigram to replace trigram when trigram doesn't exist
         else: 
             res = bi *lambdas[1] + tri* lambdas[2] + uni* lambdas[0]
+    # print(uni, bi, tri)
     return res
 
 # remove the BIOs from NER tags, adds "short_ner" column to the dataframe
@@ -191,10 +202,14 @@ def viterbi_hmm(test_seq, word_tag_prob, tag_counts, tag_unigram, tag_bigram, ta
                         curr_tags = [tags[tri_tag], tags[prev_tag], tags[tag_idx]]
                         transition = get_interpolation(curr_tags, tag_unigram, tag_bigram, tag_trigram, lambdas)
                         curr = scores[prev_tag][word_idx-1]*transition*lexical
+                        # print("transition prob.", transition)
                         if (curr > tmp_max):
                             tmp_max = curr
                             max_idx = prev_tag
-                            
+                            # print("inside interpolation")
+                            # print("before", backpointers[prev_tag][word_idx -1])
+                            backpointers[prev_tag][word_idx -1] = tri_tag
+                            # print("after", backpointers[prev_tag][word_idx -1])
             scores[tag_idx][word_idx] = tmp_max
             assert max_idx != -1
             backpointers[tag_idx][word_idx] = max_idx
@@ -225,7 +240,7 @@ def predict_test(model, training_df, test_filename):
     ner_unigrams = uniGram(training_df, "ner")
     ner_trigrams = get_trigram(training_df, "ner")
     word_tag_prob, tag_counts = get_word_tag_prob(training_df) # for hmm
-    word_tag_dict = word_MLE(raw_with_unknown) # for baseline
+    word_tag_dict = word_MLE(raw_withoutBIO) # for baseline
     indices = []
     preds = []
     print("getting predictions......")
@@ -234,7 +249,7 @@ def predict_test(model, training_df, test_filename):
         pos_tokens = test.loc[i, "pos"]
         indices += test.loc[i, "ner"][0].split(" ")
         if (model == "hmm"):
-            curr_preds = viterbi_hmm(word_tokens, word_tag_prob, tag_counts, ner_unigrams, ner_bigrams, ner_trigrams)
+            curr_preds = viterbi_hmm(word_tokens, word_tag_prob, tag_counts, ner_unigrams, ner_bigrams, ner_trigrams, True, [0.05, 0.05, 0.9])
         elif model == "memm": #TODO: fill in other options for modeling
             curr_preds = viterbi_memm(word_tokens, pos_tokens)
         elif model == "baseline":
@@ -350,7 +365,7 @@ def word_MLE(df):
     word_tags = dict()
     for i in range(len(df)):
         curr_tags = df.loc[i, "short_ner"]
-        curr_words = df.loc[i, "tokens_unknown"]
+        curr_words = df.loc[i, "tokens"]
         for j in range(len(curr_tags)):
             if curr_words[j] in word_tags.keys():
                 if curr_tags[j] in word_tags[curr_words[j]]:
@@ -382,41 +397,40 @@ if __name__ == "__main__":
     ner_bigrams = get_bigram(raw_withoutBIO, "ner")
     ner_unigrams = uniGram(raw_withoutBIO, "ner")
     ner_trigrams = get_trigram(raw_withoutBIO, "ner")
+    print("trigram misc per example is ", ner_trigrams["MISC"]["PER"])
+    print("trigram misc per example is ", ner_trigrams["MISC"])
 
     word_tag, tag_counts = get_word_tag_prob(raw_withoutBIO, "ner")
 
+    ###################################
+    #           HMM                   #
+    ###################################
+    
     test_tokens = "South	African	fast	bowler	Shaun	Pollock	concluded	his	Warwickshire	career	with	a	flourish".split("\t")
+    print("the test tokens are ", test_tokens)
     print("now predict with viterbi hmm......")
-    test_res = viterbi_hmm(test_tokens, word_tag, tag_counts, ner_unigrams, ner_bigrams, ner_trigrams, False)
+    test_res = viterbi_hmm(test_tokens, word_tag, tag_counts, ner_unigrams, ner_bigrams, ner_trigrams, True, [0, 0, 1])
     print("the predicted NER tags are")
     print(test_res)
 
-
     submission_dict = predict_test("hmm", raw_withoutBIO, "test.txt")
-    get_submission(submission_dict, "submission_interpolation.txt")
-    print("current submission file is completed, saved in submission.txt")
+    submission_file = "submission_interpolation2.txt"
+    get_submission(submission_dict, submission_file)
+    print("current submission file is completed, saved in ,", submission_file)
 
     ###################################
     #           MEMM                  #
     ###################################
 
     ### train maxent classifier     ###
-    f = open("my_classifier.pickle", "wb")
-    trainX = get_memm_train(raw_withoutBIO)
-    maxent_classifier = MaxentClassifier.train(trainX, max_iter=10)
-    pickle.dump(maxent_classifier , f)
-    f.close()
-    print("classifier saved in picklefile")
+    # f = open("my_classifier.pickle", "wb")
+    # trainX = get_memm_train(raw_withoutBIO)
+    # maxent_classifier = MaxentClassifier.train(trainX, max_iter=10)
+    # pickle.dump(maxent_classifier , f)
+    # f.close()
+    # print("classifier saved in picklefile")
 
     ### load saved classifier from pickle
-<<<<<<< HEAD
-    #f = open('my_classifier.pickle', 'rb')
-    #maxent_classifier = pickle.load(f)
-    #f.close()
-    #print("saved classifier has been loaded")
-=======
->>>>>>> de09bb2a93911b0bf14ae3313b72f7abc60179c5
-
     # word_tokens = "South	African	fast	bowler	Shaun	Pollock	concluded	his	Warwickshire	career	with	a	flourish	on	Sunday	by	taking	the	final	three	wickets	during	the	county	's	Sunday	league	victory	over	Worcestershire	.".split("\t")
     # pos_tokens = "JJ	JJ	JJ	NN	NNP	NNP	VBD	PRP$	NNP	NN	IN	DT	VB	IN	NNP	IN	VBG	DT	JJ	CD	NNS	IN	DT	NN	POS	NNP	NN	NN	IN	NNP	.".split("\t")
     # print("now predict with viterbi hmm......")
