@@ -24,6 +24,76 @@ def read_data(filename):
     res = pd.DataFrame({"tokens": tokens, "pos": pos, "ner": ner})
     return res
 
+# generate the UNIGRAM dictionary with add-k smoothing for one column in dataframe: df[col_name]
+def uniGram(df, col_name, k = 0.01):
+    unigram_dict = {}
+    for tmp in range(len(df)):
+        sentence = df.loc[tmp, col_name]
+        for token in sentence:
+            if token in unigram_dict:
+                unigram_dict[token] += 1
+            else:
+                unigram_dict[token] = 1 + k
+    total = len(unigram_dict)
+    for word in unigram_dict.keys():
+        unigram_dict[word] = unigram_dict[word]/total
+    return unigram_dict
+
+# generate the TRIGRAM dictionary with add-k smoothing for one column in dataframe: df[col_name]
+# returns a three layer dictionary
+def get_trigram(df, col_name, k = 0.01):
+    trigram_dict = dict()
+    # scan the entire text and build the raw dictionary
+    for tmp in range(len(df)):
+        sentence = df.loc[tmp, col_name]
+        for i in range(len(sentence)-2):
+            if sentence[i] in trigram_dict:
+                if sentence[i+1] in trigram_dict[sentence[i]]:
+                    if sentence[i+2] in trigram_dict[sentence[i]][sentence[i+1]]:
+                        trigram_dict[sentence[i]][sentence[i+1]][sentence[i+2]] += 1
+                    else:
+                        trigram_dict[sentence[i]][sentence[i+1]][sentence[i+2]] = 1+k
+                else:
+                    trigram_dict[sentence[i]][sentence[i+1]] = dict()
+                    trigram_dict[sentence[i]][sentence[i+1]][sentence[i+2]] = 1+k # apply smoothing
+            else:
+                trigram_dict[sentence[i]] =  dict()
+                trigram_dict[sentence[i]][sentence[i+1]] = dict()
+                trigram_dict[sentence[i]][sentence[i+1]][sentence[i+2]] = 1+k # apply smoothing
+    # compute the conditional prob.
+    for w1 in trigram_dict.keys():
+        for w2 in trigram_dict[w1].keys():
+            curr_total = sum(trigram_dict[w1][w2].values())
+            for w3 in trigram_dict[w1][w2].keys():
+                trigram_dict[w1][w2][w3] = trigram_dict[w1][w2][w3]/ curr_total
+    return trigram_dict
+
+# get the interpolation probability of three words in the sequence 
+def get_interpolation(words, unigram, bigram, trigram, lambdas = [0.2, 0.3, 0.5]):
+    assert len(lambdas) == 3 and sum(lambdas) == 1
+    assert len(words) == 3
+    w1, w2, w3 = words[0], words[1], words[2]
+    res = 0
+    if w1 in trigram.keys() and w2 in trigram[w1].keys() and w3 in trigram[w1][w2].keys(): # has such trigram
+        tri = trigram[w1][w2][w3]
+    else:
+        tri = 0
+    if w2 in bigram.keys() and w3 in bigram[w2].keys(): # has bigram
+        bi = bigram[w2][w3]
+    else:
+        bi = 0
+    uni = unigram[w3] if w3 in unigram.keys() else 0
+    if uni == 0: # w3 not in vocabulary
+        res  = 0.00000001
+    else:
+        if bi == 0: 
+            return uni # use unigram to replace bigram and trigram
+        elif tri == 0:
+            res = bi *(lambdas[1] + lambdas[2]) + uni* lambdas[0] # use bigram to replace trigram when trigram doesn't exist
+        else: 
+            res = bi *lambdas[1] + tri* lambdas[2] + uni* lambdas[0]
+    return res
+
 # remove the BIOs from NER tags, adds "short_ner" column to the dataframe
 def strip_bio(df, col_name):
     res = df.copy()
@@ -53,14 +123,10 @@ def get_bigram(df, col_name, k = 0.01):
             else:
                 bigram_dict[sentence[i]] = {}
                 bigram_dict[sentence[i]][sentence[i+1]] = 1 + k
-    #print("keys are ", bigram_dict.keys())
     for key in bigram_dict.keys():
         curr_total = sum(bigram_dict[key].values())
-        #print(curr_total)
-        #bigram_dict[key]["UNK"] = k # deal with unseen bigrams
         # compute the conditional prob.
         for word in bigram_dict[key].keys():
-            #print(bigram_dict[key][word])
             bigram_dict[key][word] = bigram_dict[key][word]/curr_total
     return bigram_dict
 
@@ -86,44 +152,48 @@ def get_word_tag_prob(df, tag_col = "ner", k = 0.01):
     print("finished calculating dictionary for P(word|tag)")
     return word_tag_dict, total_count
 
-def viterbi_hmm(test_seq, word_tag_prob, tag_counts, tag_bigram):
+
+def viterbi_hmm(test_seq, word_tag_prob, tag_counts, tag_unigram, tag_bigram, tag_trigram, interpolation = True, lambdas = [0.1, 0.2, 0.7]):
     # word_tag_prob, tag_counts = get_word_tag_prob(training_df)
     tags = list(tag_counts.keys())
-    #print("tags are ", tags)
     n = len(test_seq)
     scores = np.zeros([len(tags), n]) # dp table
     backpointers = np.zeros([len(tags), n])
-    #print("tag counts are ")
-    #print(tag_counts)
     for i in range(len(tags)): # initialization
         tag_prob = tag_counts[tags[i]] / sum(tag_counts.values())
-        #print("current tag prob", tag_prob)
         if test_seq[0] in word_tag_prob[tags[i]]:
             scores[i][0] = tag_prob * word_tag_prob[tags[i]][test_seq[0]]/ sum(word_tag_prob[tags[i]].values())
-            #print("seen score")
-            #print(scores[i][0])
         else:
             scores[i][0] = tag_prob * 0.000000001
-            #print("unknown score")
-            #print(scores[i][0])
         backpointers[i][0] = 0
     for word_idx in range(1, n): # dp step
         for tag_idx in range(len(tags)):
             tmp_max = 0
             max_idx = -1
             for prev_tag in range(len(tags)):
-                if (tags[tag_idx] in tag_bigram[tags[prev_tag]].keys()):
-                    transition = tag_bigram[tags[prev_tag]][tags[tag_idx]]
-                else: # deal with unseen tag bigrams
-                    transition = 0.000000001
+                # get the emission prob.
                 if test_seq[word_idx] in word_tag_prob[tags[tag_idx]]:
                     lexical = word_tag_prob[tags[tag_idx]][test_seq[word_idx]] / sum(word_tag_prob[tags[tag_idx]].values())
-                else: # FIXME: distinguish between unseen pairs and unknown words???
+                else: # 
                     lexical = 0.000000001
-                curr = scores[prev_tag][word_idx-1]*transition*lexical
-                if (curr > tmp_max):
-                    tmp_max = curr
-                    max_idx = prev_tag
+                # get transition prob. and update max value and tag index
+                if not interpolation or word_idx < 2: # use bigram 
+                    if (tags[tag_idx] in tag_bigram[tags[prev_tag]].keys()):
+                        transition = tag_bigram[tags[prev_tag]][tags[tag_idx]]
+                    else: # deal with unseen tag bigrams
+                        transition = 0.000000001
+                    curr = scores[prev_tag][word_idx-1]*transition*lexical
+                    if (curr > tmp_max):
+                        tmp_max = curr
+                        max_idx = prev_tag
+                else: # use interpolation
+                    for tri_tag in range(len(tags)):
+                        curr_tags = [tags[tri_tag], tags[prev_tag], tags[tag_idx]]
+                        transition = get_interpolation(curr_tags, tag_unigram, tag_bigram, tag_trigram, lambdas)
+                        curr = scores[prev_tag][word_idx-1]*transition*lexical
+                        if (curr > tmp_max):
+                            tmp_max = curr
+                            max_idx = prev_tag
             scores[tag_idx][word_idx] = tmp_max
             assert max_idx != -1
             backpointers[tag_idx][word_idx] = max_idx
@@ -150,8 +220,11 @@ returns a dictionary that can be used to generate the submission file
 """
 def predict_test(model, training_df, test_filename):
     test = read_test(test_filename)
-    ner_bigram = get_bigram(training_df, "ner")
-    word_tag_prob, tag_counts = get_word_tag_prob(training_df)
+    ner_bigrams = get_bigram(training_df, "ner")
+    ner_unigrams = uniGram(training_df, "ner")
+    ner_trigrams = get_trigram(training_df, "ner")
+    word_tag_prob, tag_counts = get_word_tag_prob(training_df) # for hmm
+    word_tag_dict = word_MLE(raw_with_unknown) # for baseline
     indices = []
     preds = []
     print("getting predictions......")
@@ -160,9 +233,11 @@ def predict_test(model, training_df, test_filename):
         pos_tokens = test.loc[i, "pos"]
         indices += test.loc[i, "ner"][0].split(" ")
         if (model == "hmm"):
-            curr_preds = viterbi_hmm(word_tokens, word_tag_prob, tag_counts, ner_bigram)
-        else: #TODO: fill in other options for modeling
+            curr_preds = viterbi_hmm(word_tokens, word_tag_prob, tag_counts, ner_unigrams, ner_bigrams, ner_trigrams)
+        elif model == "memm": #TODO: fill in other options for modeling
             curr_preds = viterbi_memm(word_tokens, pos_tokens)
+        elif model == "baseline":
+            curr_preds = baseline_predict(test_tokens, word_tag_dict)
         # remove the BIOs
         for i in range(len(curr_preds)):
             if "-" in curr_preds[i]:
@@ -254,27 +329,59 @@ def viterbi_memm(word_seq, pos_seq):
         n -= 1
     return tag_preds
 
+"""
+the baseline MLE model
+"""
+# returns the tag counts for each word
+def word_MLE(df):
+    word_tags = dict()
+    for i in range(len(df)):
+        curr_tags = df.loc[i, "short_ner"]
+        curr_words = df.loc[i, "tokens_unknown"]
+        for j in range(len(curr_tags)):
+            if curr_words[j] in word_tags.keys():
+                if curr_tags[j] in word_tags[curr_words[j]]:
+                    word_tags[curr_words[j]][curr_tags[j]] += 1
+                else: 
+                    word_tags[curr_words[j]][curr_tags[j]] = 1
+            else: 
+                word_tags[curr_words[j]] = dict()
+                word_tags[curr_words[j]][curr_tags[j]] = 1
+    return word_tags
+
+def baseline_predict(test_seq, word_tags):
+    preds = []
+    for word in test_seq:
+        if word in word_tags:
+            curr = max(word_tags[word], key=word_tags[word].get)
+        else:
+            curr = max(word_tags["UNK"], key = word_tags["UNK"].get)
+        preds.append(curr)
+    assert len(preds) == len(test_seq)
+    return preds
+
 if __name__ == "__main__":
+    print("reading training file....")
     raw = read_data("train.txt")
-    print("raw training ", raw.columns)
-
     raw_withoutBIO = strip_bio(raw, "ner") # ner, pos, tokens, short_ner
-    print("after removing BIOs ", raw_withoutBIO.columns)
 
+    print("finished preprocessing, generating n-gram dictionaries.....")
     ner_bigrams = get_bigram(raw_withoutBIO, "ner")
+    ner_unigrams = uniGram(raw_withoutBIO, "ner")
+    ner_trigrams = get_trigram(raw_withoutBIO, "ner")
 
     word_tag, tag_counts = get_word_tag_prob(raw_withoutBIO, "ner")
 
     test_tokens = "South	African	fast	bowler	Shaun	Pollock	concluded	his	Warwickshire	career	with	a	flourish".split("\t")
     print("now predict with viterbi hmm......")
-    test_res = viterbi_hmm(test_tokens, word_tag, tag_counts, ner_bigrams)
+    test_res = viterbi_hmm(test_tokens, word_tag, tag_counts, ner_unigrams, ner_bigrams, ner_trigrams, False)
     print("the predicted NER tags are")
     print(test_res)
 
 
-    #submission_dict = predict_test("hmm", raw_withoutBIO, "test.txt")
-    #get_submission(submission_dict, "submission.txt")
-    #print("current submission file is completed, saved in submission.txt")
+    submission_dict = predict_test("hmm", raw_withoutBIO, "test.txt")
+    get_submission(submission_dict, "submission_interpolation.txt")
+    print("current submission file is completed, saved in submission.txt")
 
     ###################################
     #           MEMM                  #
@@ -289,18 +396,18 @@ if __name__ == "__main__":
     #print("classifier saved in picklefile")
 
     ### load saved classifier from pickle
-    f = open('my_classifier.pickle', 'rb')
-    maxent_classifier = pickle.load(f)
-    f.close()
-    print("saved classifier has been loaded")
+    # f = open('my_classifier.pickle', 'rb')
+    # maxent_classifier = pickle.load(f)
+    # f.close()
+    # print("saved classifier has been loaded")
 
-    word_tokens = "South	African	fast	bowler	Shaun	Pollock	concluded	his	Warwickshire	career	with	a	flourish	on	Sunday	by	taking	the	final	three	wickets	during	the	county	's	Sunday	league	victory	over	Worcestershire	.".split("\t")
-    pos_tokens = "JJ	JJ	JJ	NN	NNP	NNP	VBD	PRP$	NNP	NN	IN	DT	VB	IN	NNP	IN	VBG	DT	JJ	CD	NNS	IN	DT	NN	POS	NNP	NN	NN	IN	NNP	.".split("\t")
-    print("now predict with viterbi hmm......")
-    test_res = viterbi_memm(word_tokens, pos_tokens)
-    print("the predicted NER tags are")
-    print(test_res)
+    # word_tokens = "South	African	fast	bowler	Shaun	Pollock	concluded	his	Warwickshire	career	with	a	flourish	on	Sunday	by	taking	the	final	three	wickets	during	the	county	's	Sunday	league	victory	over	Worcestershire	.".split("\t")
+    # pos_tokens = "JJ	JJ	JJ	NN	NNP	NNP	VBD	PRP$	NNP	NN	IN	DT	VB	IN	NNP	IN	VBG	DT	JJ	CD	NNS	IN	DT	NN	POS	NNP	NN	NN	IN	NNP	.".split("\t")
+    # print("now predict with viterbi hmm......")
+    # test_res = viterbi_memm(word_tokens, pos_tokens)
+    # print("the predicted NER tags are")
+    # print(test_res)
 
-    submission_dict = predict_test("memm", raw_withoutBIO, "test.txt")
-    get_submission(submission_dict, "submission_memm.txt")
-    print("current submission file is completed, saved in submission_memm.txt")
+    # submission_dict = predict_test("memm", raw_withoutBIO, "test.txt")
+    # get_submission(submission_dict, "submission_memm.txt")
+    # print("current submission file is completed, saved in submission_memm.txt")
