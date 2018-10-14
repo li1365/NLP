@@ -5,7 +5,8 @@ import random, string, copy
 
 # take the txt file, return dictionary with three keys: tokens, POS tags and NER tags
 def read_data(filename):
-    lines = open(filename, "r").read().split("\r\n")
+    with open(filename, "r") as f:
+        lines = f.read().split("\n")
     tokens = []
     pos = []
     ner = []
@@ -30,15 +31,16 @@ def tokensWithUnk(df, col_names):
     tokens_used = set()
     # tokens_unk = copy.deepcopy(tokens)
     for col_name in col_names:
-        new_col = col_name + "_unknown"
-        res[new_col] = res[col_name]
-        for i in range(len(res)):
-            curr = res.loc[i, new_col]
-            for j in range(len(curr)):
-                if curr[j] not in tokens_used:
-                    tokens_used.add(curr[j])
-                    curr[j] = 'UNK'
-            res.loc[i, new_col] = curr
+        if "ner" not in col_name:
+            new_col = col_name + "_unknown"
+            res[new_col] = res[col_name]
+            for i in range(len(res)):
+                curr = res.loc[i, new_col]
+                for j in range(len(curr)):
+                    if curr[j] not in tokens_used:
+                        tokens_used.add(curr[j])
+                        curr[j] = 'UNK'
+                res.loc[i, new_col] = curr
     return res.reset_index()
 
 # remove the BIOs from NER tags, adds "short_ner" column to the dataframe
@@ -70,14 +72,12 @@ def get_bigram(df, col_name, k = 0.01):
             else:
                 bigram_dict[sentence[i]] = {}
                 bigram_dict[sentence[i]][sentence[i+1]] = 1 + k
-    print("keys are ", bigram_dict.keys())
+    # print("keys are ", bigram_dict.keys())
     for key in bigram_dict.keys():
         curr_total = sum(bigram_dict[key].values())
-        print(curr_total)
         bigram_dict[key]["UNK"] = k # deal with unseen bigrams
         # compute the conditional prob. 
         for word in bigram_dict[key].keys(): 
-            print(bigram_dict[key][word])
             bigram_dict[key][word] = bigram_dict[key][word]/curr_total
     return bigram_dict
 
@@ -90,7 +90,7 @@ return two dictionaries:
     one with key of tags and values being the occurances of that tag
 TODO: clarify the definition of tags (whether to include BIO?????)
 """
-def get_word_tag_prob(df, tag_col = "short_ner_unknown", k = 0.01):
+def get_word_tag_prob(df, tag_col = "short_ner", k = 0.01):
     word_tag_dict = dict()
     total_count = dict()
     for doc_idx in range(len(df)):
@@ -126,23 +126,24 @@ output: list of tags
 def viterbi_hmm(test_seq, word_tag_prob, tag_counts, tag_bigram):
     # word_tag_prob, tag_counts = get_word_tag_prob(training_df)
     tags = list(tag_counts.keys())
-    print("tags are ", tags)
+    # print("tags are ", tags)
     n = len(test_seq)
     scores = np.zeros([len(tags), n]) # dp table
     backpointers = np.zeros([len(tags), n]) 
-    print("tag counts are ")
-    print(tag_counts)
+    # print("tag counts are ")
+    # print(tag_counts)
     for i in range(len(tags)): # initialization
-        tag_prob = tag_counts[tags[i]] / sum(tag_counts.values())
+        # tag_prob = tag_counts[tags[i]] / sum(tag_counts.values())
+        tag_prob = i + 1
         print("current tag prob", tag_prob)
         if test_seq[0] in word_tag_prob[tags[i]]:
             scores[i][0] = tag_prob * word_tag_prob[tags[i]][test_seq[0]]/ sum(word_tag_prob[tags[i]].values())
-            print("seen score")
-            print(scores[i][0])
+            # print("seen score")
+            # print(scores[i][0])
         else: 
             scores[i][0] = tag_prob * word_tag_prob[tags[i]]["UNK"]/sum(word_tag_prob[tags[i]].values())
-            print("unknown score")
-            print(scores[i][0])
+            # print("unknown score")
+            # print(scores[i][0])
         backpointers[i][0] = 0 
     for word_idx in range(1, n): # dp step
         for tag_idx in range(len(tags)):
@@ -195,8 +196,9 @@ returns a dictionary that can be used to generate the submission file
 """
 def predict_test(model, training_df, test_filename):
     test = read_test(test_filename)
-    ner_bigram = get_bigram(training_df, "short_ner_unknown")
-    word_tag_prob, tag_counts = get_word_tag_prob(training_df)
+    ner_bigram = get_bigram(training_df, "short_ner")
+    word_tag_prob, tag_counts = get_word_tag_prob(training_df) # for hmm
+    word_tag_dict = word_MLE(raw_with_unknown) # for baseline
     indices = []
     preds = []
     print("getting predictions......")
@@ -205,8 +207,8 @@ def predict_test(model, training_df, test_filename):
         indices += test.loc[i, "ner"][0].split(" ")
         if (model == "hmm"):
             curr_preds = viterbi_hmm(test_tokens, word_tag_prob, tag_counts, ner_bigram)
-        else: #TODO: fill in other options for modeling
-            return
+        elif model == "baseline": #TODO: fill in other options for modeling
+            curr_preds = baseline_predict(test_tokens, word_tag_dict)
         # remove the BIOs
         for i in range(len(curr_preds)):
             if "-" in curr_preds[i]:
@@ -247,6 +249,34 @@ def split_training(tokens, pos, ner):
 
 print("converting txt file to dataframe......")
 
+# returns the tag counts for each word
+def word_MLE(df):
+    word_tags = dict()
+    for i in range(len(df)):
+        curr_tags = df.loc[i, "short_ner"]
+        curr_words = df.loc[i, "tokens_unknown"]
+        for j in range(len(curr_tags)):
+            if curr_words[j] in word_tags.keys():
+                if curr_tags[j] in word_tags[curr_words[j]]:
+                    word_tags[curr_words[j]][curr_tags[j]] += 1
+                else: 
+                    word_tags[curr_words[j]][curr_tags[j]] = 1
+            else: 
+                word_tags[curr_words[j]] = dict()
+                word_tags[curr_words[j]][curr_tags[j]] = 1
+    return word_tags
+
+def baseline_predict(test_seq, word_tags):
+    preds = []
+    for word in test_seq:
+        if word in word_tags:
+            curr = max(word_tags[word], key=word_tags[word].get)
+        else:
+            curr = max(word_tags["UNK"], key = word_tags["UNK"].get)
+        preds.append(curr)
+    assert len(preds) == len(test_seq)
+    return preds
+
 """
 preprocessing units...
 """
@@ -255,27 +285,21 @@ preprocessing units...
 # raw_with_unknown = strip_bio(raw, "ner")
 # print("after removing BIOs ", raw_with_unknown.columns)
 # raw_with_unknown.to_csv("tmp.csv", index = False)
-# unknown_cols = ["short_ner", "tokens", "pos"]
+# unknown_cols = ["tokens"]
 # raw_with_unknown = tokensWithUnk(raw_with_unknown, unknown_cols)
 # print("after dealing with unknown")
 # print(raw_with_unknown.columns)
 # raw_with_unknown.to_csv("/Users/JanicaTang/Desktop/NLP/train_data.csv", index = False)
 # raw_with_unknown.to_pickle("raw_with_unknown.pkl")
 
-
-
 # print("now getting the bigram for NER tags...")
 raw_with_unknown = pd.read_pickle("raw_with_unknown.pkl")
-word_tag, tag_counts = get_word_tag_prob(raw_with_unknown, "short_ner_unknown")
-ner_bigrams = get_bigram(raw_with_unknown, "short_ner_unknown")
+word_tag, tag_counts = get_word_tag_prob(raw_with_unknown, "short_ner")
+ner_bigrams = get_bigram(raw_with_unknown, "short_ner")
 
 print("the bigram is")
 print(ner_bigrams)
 print("word tag prob is")
-# # print(word_tag["O"]["South"])
-# print(word_tag["PER"]["America"])
-# # print(word_tag["ORG"]["South"])
-# print(word_tag["ORG"]["America"])
 
 test_tokens = "South	African	fast	bowler	Shaun	Pollock	concluded	his	Warwickshire	career	with	a	flourish".split("\t")
 test2 = "Yorkshire	captain	David	Byas	completed	his	third	Sunday	league	century	as	his	side	swept	clear	at	the	top	of	the	table	,	reaching	a	career	best	111	not	out	against	Lancashire	.".split("\t")
@@ -288,6 +312,11 @@ test_res = viterbi_hmm(test_tokens, word_tag, tag_counts, ner_bigrams)
 print("the predicted NER tags are")
 print(test_res)
 
+print("THE BASE LINEEEEEEEEEE")
+word_tag_dict = word_MLE(raw_with_unknown)
+base_res = baseline_predict(test_tokens, word_tag_dict)
+print(base_res)
+
 # import numpy as np
 # a = np.array([1,2,3,4,5,6]).reshape([2,3])
 # b = np.zeros([2,3])
@@ -299,5 +328,7 @@ print(test_res)
 generate test submission files
 """
 # submission_dict = predict_test("hmm", raw_with_unknown, "test.txt")
-# get_submission(submission_dict, "submission.txt")
-# print("current submission file is completed, saved in submission.txt")
+baselien_submission = predict_test("baseline", raw_with_unknown, "test.txt")
+
+get_submission(baselien_submission, "baseline_submission.txt")
+print("current submission file is completed, saved in submission.txt")
