@@ -194,6 +194,7 @@ def viterbi_hmm(test_seq, word_tag_prob, tag_counts, tag_unigram, tag_bigram, ta
                         if (curr > tmp_max):
                             tmp_max = curr
                             max_idx = prev_tag
+                            
             scores[tag_idx][word_idx] = tmp_max
             assert max_idx != -1
             backpointers[tag_idx][word_idx] = max_idx
