@@ -237,6 +237,7 @@ returns a dictionary that can be used to generate the submission file
 def predict_test(model, training_df, test_filename):
     test = read_test(test_filename)
     ner_bigrams = get_bigram(training_df, "ner")
+    word_bigram = get_bigram(training_df, "tokens")
     ner_unigrams = uniGram(training_df, "ner")
     ner_trigrams = get_trigram(training_df, "ner")
     word_tag_prob, tag_counts = get_word_tag_prob(training_df) # for hmm
@@ -251,9 +252,9 @@ def predict_test(model, training_df, test_filename):
         if (model == "hmm"):
             curr_preds = viterbi_hmm(word_tokens, word_tag_prob, tag_counts, ner_unigrams, ner_bigrams, ner_trigrams, True, [0.05, 0.05, 0.9])
         elif model == "memm": #TODO: fill in other options for modeling
-            curr_preds = viterbi_memm(word_tokens, pos_tokens)
+            curr_preds = viterbi_memm(word_tokens, pos_tokens, word_bigram, ner_bigrams)
         elif model == "baseline":
-            curr_preds = baseline_predict(test_tokens, word_tag_dict)
+            curr_preds = baseline_predict(word_tokens, word_tag_dict)
         # remove the BIOs
         for i in range(len(curr_preds)):
             if "-" in curr_preds[i]:
@@ -287,7 +288,8 @@ def get_submission(submission, filename):
         file.write(tags[i] + "," + tmp + "\n")
     file.close()
 
-def get_memm_train(df):
+def get_memm_train(df, bigrams):
+    word_bigram, ner_bigram = bigrams[0], bigrams[1]
     trainX = list()
     for doc_idx in range(len(df)):
         curr_poss = df.loc[doc_idx, "pos"]
@@ -296,41 +298,90 @@ def get_memm_train(df):
         assert len(curr_poss) == len(curr_words)
         for i in range(len(curr_poss)):
             features = dict()
+            features["position"] = i
+            # regarding previous word
             if i == 0:
                 features['curr_pos'] = curr_poss[i]
                 features['curr_word'] = curr_words[i]
                 features['prev_word'] = "init"
                 features['prev_pos'] = "init"
                 features['prev_ner'] = "init"
+                features["ner_bigram"] = 0.000001
             else:
                 features['curr_pos'] = curr_poss[i]
                 features['curr_word'] = curr_words[i]
                 features['prev_word'] = curr_words[i-1]
                 features['prev_pos'] = curr_poss[i-1]
                 features['prev_ner'] = curr_ner[i-1]
+            # add in n-grams
+            if i == 0 or (curr_words[i-1] not in word_bigram.keys()) or (curr_words[i] not in word_bigram[curr_words[i-1]].keys()):
+                features["bigram"] = 0.000001
+            else:
+                features["bigram"] = word_bigram[curr_words[i-1]][curr_words[i]]
+            if curr_ner[i] not in ner_bigram[curr_ner[i-1]]:
+                features["ner_bigram"] = 0.000001
+            else:
+                features["ner_bigram"] = ner_bigram[curr_ner[i-1]][curr_ner[i]]
+            # other stuff
+            features["captial"] = 1 if curr_words[i][0].isupper() else -1
+            # regarding next word
+            if i == len(curr_words) -1:
+                features["next_word"] = "last"
+                features["next_pos"] = "last"
+                # features["next_ner"] = "last"
+            else:
+                features["next_word"] = curr_words[i+1]
+                features['next_pos'] = curr_poss[i+1]
+                # features['next_ner'] = curr_ner[i+1]
             ner = curr_ner[i]
             trainX.append((features, ner))
     return trainX
 
-def get_memm_features(word, pos, prev_word, prev_pos, ner):
+# def get_memm_features(word, pos, prev_word, prev_pos, ner):
+def get_memm_features(word_seq, pos_seq, doc_idx, ner_tuple, bigrams, init = False):
+    word_bigram, ner_bigram = bigrams[0], bigrams[1]
+    assert len(word_seq) == len(pos_seq)
     features = dict()
-    features['curr_word'] = word
-    features['curr_pos'] = pos
-    features['prev_ner'] = ner
-    features['prev_word'] = prev_word
-    features['prev_pos'] = prev_pos
+    features["position"] = doc_idx
+    features['curr_word'] = word_seq[doc_idx]
+    features['curr_pos'] = pos_seq[doc_idx]
+    if init:
+        features['prev_ner'] = "init"
+        features['prev_word'] = "init"
+        features['prev_pos'] = "init"
+        features["bigram"] = 0.000001
+        features["ner_bigram"] = 0.000001
+    else:
+        features['prev_ner'] = ner_tuple[0]
+        features['prev_word'] = word_seq[doc_idx-1]
+        features['prev_pos'] = pos_seq[doc_idx-1]
+        if word_seq[doc_idx - 1] in word_bigram.keys() and word_seq[doc_idx] in word_bigram[word_seq[doc_idx - 1]].keys():
+            features["bigram"] = word_bigram[word_seq[doc_idx - 1]][word_seq[doc_idx]]
+        else:
+            features["bigram"] = 0.000001
+        if ner_tuple[1] not in ner_bigram[ner_tuple[0]]:
+            features["ner_bigram"] = 0.000001
+        else:
+            features["ner_bigram"] = ner_bigram[ner_tuple[0]][ner_tuple[1]]
+    if doc_idx == len(word_seq) -1:
+        features["next_word"] = "last"
+        features["next_pos"] = "last"
+    else:
+        features['next_word'] = word_seq[doc_idx+1]
+        features['next_pos'] = pos_seq[doc_idx+1]
+    features["captial"] = 1 if word_seq[doc_idx][0].isupper() else -1
+
     return features
 
-def viterbi_memm(word_seq, pos_seq):
+def viterbi_memm(word_seq, pos_seq, word_bigram, ner_bigram):
     assert len(word_seq) == len(pos_seq)
     tags = ['O', 'ORG', 'PER', 'LOC', 'MISC']
     n = len(word_seq)
     scores = np.zeros([len(tags), n]) # dp table
     backpointers = np.zeros([len(tags), n])
-    w1 = word_seq[0]
-    p1 = pos_seq[0]
     for i in range(len(tags)): # initialization
-        probability = maxent_classifier.prob_classify(get_memm_features(w1,p1,"init", "init", "init" ))
+        init_features = get_memm_features(word_seq, pos_seq, 0, ["init", tags[i]], [word_bigram, ner_bigram], True)
+        probability = maxent_classifier.prob_classify(init_features)
         posterior = float(probability.prob(tags[i]))
         scores[i][0] = posterior
         backpointers[i][0] = 0
@@ -339,7 +390,8 @@ def viterbi_memm(word_seq, pos_seq):
             tmp_max = 0
             max_idx = -1
             for prev_tag in range(len(tags)):
-                probability = maxent_classifier.prob_classify(get_memm_features(word_seq[word_idx], pos_seq[word_idx], word_seq[word_idx-1], pos_seq[word_idx-1], tags[prev_tag]))
+                curr_features = get_memm_features(word_seq, pos_seq, word_idx, [tags[prev_tag], tags[tag_idx]], [word_bigram, ner_bigram])
+                probability = maxent_classifier.prob_classify(curr_features)
                 posterior = float(probability.prob(tags[tag_idx]))
                 curr = scores[prev_tag][word_idx-1] * posterior
                 if (curr > tmp_max):
@@ -406,38 +458,44 @@ if __name__ == "__main__":
     #           HMM                   #
     ###################################
     
-    test_tokens = "South	African	fast	bowler	Shaun	Pollock	concluded	his	Warwickshire	career	with	a	flourish".split("\t")
-    print("the test tokens are ", test_tokens)
-    print("now predict with viterbi hmm......")
-    test_res = viterbi_hmm(test_tokens, word_tag, tag_counts, ner_unigrams, ner_bigrams, ner_trigrams, True, [0, 0, 1])
-    print("the predicted NER tags are")
-    print(test_res)
+    # test_tokens = "South	African	fast	bowler	Shaun	Pollock	concluded	his	Warwickshire	career	with	a	flourish".split("\t")
+    # print("the test tokens are ", test_tokens)
+    # print("now predict with viterbi hmm......")
+    # test_res = viterbi_hmm(test_tokens, word_tag, tag_counts, ner_unigrams, ner_bigrams, ner_trigrams, True, [0, 0, 1])
+    # print("the predicted NER tags are")
+    # print(test_res)
 
-    submission_dict = predict_test("hmm", raw_withoutBIO, "test.txt")
-    submission_file = "submission_interpolation2.txt"
-    get_submission(submission_dict, submission_file)
-    print("current submission file is completed, saved in ,", submission_file)
+    # submission_dict = predict_test("hmm", raw_withoutBIO, "test.txt")
+    # submission_file = "submission_interpolation2.txt"
+    # get_submission(submission_dict, submission_file)
+    # print("current submission file is completed, saved in ,", submission_file)
 
     ###################################
     #           MEMM                  #
     ###################################
 
     ### train maxent classifier     ###
-    # f = open("my_classifier.pickle", "wb")
-    # trainX = get_memm_train(raw_withoutBIO)
+    word_bigram = get_bigram(raw_withoutBIO, "tokens")
+
+    # f = open("classifier_10iter.pickle", "wb")
+    # trainX = get_memm_train(raw_withoutBIO, [word_bigram, ner_bigrams])
     # maxent_classifier = MaxentClassifier.train(trainX, max_iter=10)
     # pickle.dump(maxent_classifier , f)
     # f.close()
-    # print("classifier saved in picklefile")
+    print("classifier saved in picklefile")
 
     ### load saved classifier from pickle
-    # word_tokens = "South	African	fast	bowler	Shaun	Pollock	concluded	his	Warwickshire	career	with	a	flourish	on	Sunday	by	taking	the	final	three	wickets	during	the	county	's	Sunday	league	victory	over	Worcestershire	.".split("\t")
-    # pos_tokens = "JJ	JJ	JJ	NN	NNP	NNP	VBD	PRP$	NNP	NN	IN	DT	VB	IN	NNP	IN	VBG	DT	JJ	CD	NNS	IN	DT	NN	POS	NNP	NN	NN	IN	NNP	.".split("\t")
-    # print("now predict with viterbi hmm......")
-    # test_res = viterbi_memm(word_tokens, pos_tokens)
-    # print("the predicted NER tags are")
-    # print(test_res)
+    with open("classifier_10iter.pickle", 'rb') as f:  
+        maxent_classifier = pickle.loads(f.read())
 
-    # submission_dict = predict_test("memm", raw_withoutBIO, "test.txt")
-    # get_submission(submission_dict, "submission_memm.txt")
-    # print("current submission file is completed, saved in submission_memm.txt")
+
+    word_tokens = "South	African	fast	bowler	Shaun	Pollock	concluded	his	Warwickshire	career	with	a	flourish	on	Sunday	by	taking	the	final	three	wickets	during	the	county	's	Sunday	league	victory	over	Worcestershire	.".split("\t")
+    pos_tokens = "JJ	JJ	JJ	NN	NNP	NNP	VBD	PRP$	NNP	NN	IN	DT	VB	IN	NNP	IN	VBG	DT	JJ	CD	NNS	IN	DT	NN	POS	NNP	NN	NN	IN	NNP	.".split("\t")
+    print("now predict with viterbi memm......")
+    test_res = viterbi_memm(word_tokens, pos_tokens, word_bigram, ner_bigrams)
+    print("the predicted NER tags are")
+    print(test_res)
+
+    submission_dict = predict_test("memm", raw_withoutBIO, "test.txt")
+    get_submission(submission_dict, "submission_memm.txt")
+    print("current submission file is completed, saved in submission_memm.txt")
