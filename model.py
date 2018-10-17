@@ -3,6 +3,9 @@ import pandas as pd
 from nltk import ngrams
 from nltk.classify import MaxentClassifier
 import pickle
+from gensim.test.utils import datapath, get_tmpfile
+from gensim.models import KeyedVectors
+from gensim.scripts.glove2word2vec import glove2word2vec
 
 # take the txt file, return dictionary with three keys: tokens, POS tags and NER tags
 def read_data(filename):
@@ -288,8 +291,41 @@ def get_submission(submission, filename):
         file.write(tags[i] + "," + tmp + "\n")
     file.close()
 
-def get_memm_train(df, bigrams):
-    word_bigram, ner_bigram = bigrams[0], bigrams[1]
+
+def get_glove_features(curr_words, i, embedding):
+    assert i < len(curr_words)
+    res = dict()
+    tokens = {}
+    tokens["curr"] = curr_words[i]
+    if i == 0:
+        tokens["prev"] = "initt"
+    else: 
+        tokens["prev"] = curr_words[i-1]
+    if i == len(curr_words) -1:
+        tokens["next"] = "lastt"
+    else:
+        tokens["next"] = curr_words[i+1]
+    for key in tokens.keys():
+        try: 
+            word_vec = embedding[tokens[key]]
+        except:
+            if tokens[key] == "initt": # use all ones for init token
+                word_vec = np.ones(300)
+            elif tokens[key] == "lastt":# use all zeros for last token
+                word_vec = np.zeros(300) 
+            else:# use all 1/2 for tokens not in glove dictionary
+                word_vec = np.ones(300)*0.5
+        for tmp in range(len(word_vec)):
+            tmp_key = key + str(tmp)
+            res[tmp_key] = word_vec[tmp]
+    # print(len(res))
+    # print(res.keys())
+    assert len(res) == 900
+    return res
+
+def get_memm_train(df, bigrams, embedding):
+    print("generating training features for MaxEntrophy Classifier")
+    word_bigram = bigrams
     trainX = list()
     for doc_idx in range(len(df)):
         curr_poss = df.loc[doc_idx, "pos"]
@@ -297,40 +333,35 @@ def get_memm_train(df, bigrams):
         curr_ner = df.loc[doc_idx, "ner"]
         assert len(curr_poss) == len(curr_words)
         for i in range(len(curr_poss)):
-            features = dict()
+            features = get_glove_features(curr_words, i, embedding)
             features["position"] = i
             # regarding previous word
             if i == 0:
                 features['curr_pos'] = curr_poss[i]
-                features['curr_word'] = curr_words[i]
-                features['prev_word'] = "init"
-                features['prev_pos'] = "init"
+                # features['curr_word'] = curr_words[i]
+                # features['prev_word'] = "init"
+                # features['prev_pos'] = "init"
                 features['prev_ner'] = "init"
                 features["ner_bigram"] = 0.000001
             else:
                 features['curr_pos'] = curr_poss[i]
-                features['curr_word'] = curr_words[i]
-                features['prev_word'] = curr_words[i-1]
                 features['prev_pos'] = curr_poss[i-1]
                 features['prev_ner'] = curr_ner[i-1]
+                # features['curr_word'] = curr_words[i]
+                # features['prev_word'] = curr_words[i-1]
             # add in n-grams
             if i == 0 or (curr_words[i-1] not in word_bigram.keys()) or (curr_words[i] not in word_bigram[curr_words[i-1]].keys()):
                 features["bigram"] = 0.000001
             else:
                 features["bigram"] = word_bigram[curr_words[i-1]][curr_words[i]]
-            if curr_ner[i] not in ner_bigram[curr_ner[i-1]]:
-                features["ner_bigram"] = 0.000001
-            else:
-                features["ner_bigram"] = ner_bigram[curr_ner[i-1]][curr_ner[i]]
-            # other stuff
             features["captial"] = 1 if curr_words[i][0].isupper() else -1
             # regarding next word
             if i == len(curr_words) -1:
-                features["next_word"] = "last"
+            #     features["next_word"] = "last"
                 features["next_pos"] = "last"
                 # features["next_ner"] = "last"
             else:
-                features["next_word"] = curr_words[i+1]
+            #     features["next_word"] = curr_words[i+1]
                 features['next_pos'] = curr_poss[i+1]
                 # features['next_ner'] = curr_ner[i+1]
             ner = curr_ner[i]
@@ -338,49 +369,44 @@ def get_memm_train(df, bigrams):
     return trainX
 
 # def get_memm_features(word, pos, prev_word, prev_pos, ner):
-def get_memm_features(word_seq, pos_seq, doc_idx, ner_tuple, bigrams, init = False):
-    word_bigram, ner_bigram = bigrams[0], bigrams[1]
+def get_memm_features(word_seq, pos_seq, doc_idx, ner_tuple, bigrams, embedding, init = False):
+    word_bigram= bigrams
     assert len(word_seq) == len(pos_seq)
-    features = dict()
+    features = get_glove_features(word_seq, doc_idx, embedding)
     features["position"] = doc_idx
-    features['curr_word'] = word_seq[doc_idx]
+    # features['curr_word'] = word_seq[doc_idx]
     features['curr_pos'] = pos_seq[doc_idx]
     if init:
         features['prev_ner'] = "init"
-        features['prev_word'] = "init"
+        # features['prev_word'] = "init"
         features['prev_pos'] = "init"
         features["bigram"] = 0.000001
         features["ner_bigram"] = 0.000001
     else:
         features['prev_ner'] = ner_tuple[0]
-        features['prev_word'] = word_seq[doc_idx-1]
+        # features['prev_word'] = word_seq[doc_idx-1]
         features['prev_pos'] = pos_seq[doc_idx-1]
         if word_seq[doc_idx - 1] in word_bigram.keys() and word_seq[doc_idx] in word_bigram[word_seq[doc_idx - 1]].keys():
             features["bigram"] = word_bigram[word_seq[doc_idx - 1]][word_seq[doc_idx]]
         else:
             features["bigram"] = 0.000001
-        if ner_tuple[1] not in ner_bigram[ner_tuple[0]]:
-            features["ner_bigram"] = 0.000001
-        else:
-            features["ner_bigram"] = ner_bigram[ner_tuple[0]][ner_tuple[1]]
     if doc_idx == len(word_seq) -1:
-        features["next_word"] = "last"
+        # features["next_word"] = "last"
         features["next_pos"] = "last"
     else:
-        features['next_word'] = word_seq[doc_idx+1]
+        # features['next_word'] = word_seq[doc_idx+1]
         features['next_pos'] = pos_seq[doc_idx+1]
     features["captial"] = 1 if word_seq[doc_idx][0].isupper() else -1
-
     return features
 
-def viterbi_memm(word_seq, pos_seq, word_bigram, ner_bigram):
+def viterbi_memm(word_seq, pos_seq, word_bigram, ner_bigram, embedding):
     assert len(word_seq) == len(pos_seq)
     tags = ['O', 'ORG', 'PER', 'LOC', 'MISC']
     n = len(word_seq)
     scores = np.zeros([len(tags), n]) # dp table
     backpointers = np.zeros([len(tags), n])
     for i in range(len(tags)): # initialization
-        init_features = get_memm_features(word_seq, pos_seq, 0, ["init", tags[i]], [word_bigram, ner_bigram], True)
+        init_features = get_memm_features(word_seq, pos_seq, 0, ["init", tags[i]], word_bigram, embedding, True)
         probability = maxent_classifier.prob_classify(init_features)
         posterior = float(probability.prob(tags[i]))
         scores[i][0] = posterior
@@ -390,7 +416,7 @@ def viterbi_memm(word_seq, pos_seq, word_bigram, ner_bigram):
             tmp_max = 0
             max_idx = -1
             for prev_tag in range(len(tags)):
-                curr_features = get_memm_features(word_seq, pos_seq, word_idx, [tags[prev_tag], tags[tag_idx]], [word_bigram, ner_bigram])
+                curr_features = get_memm_features(word_seq, pos_seq, word_idx, [tags[prev_tag], tags[tag_idx]], word_bigram, embedding)
                 probability = maxent_classifier.prob_classify(curr_features)
                 posterior = float(probability.prob(tags[tag_idx]))
                 curr = scores[prev_tag][word_idx-1] * posterior
@@ -416,7 +442,7 @@ the baseline MLE model
 def word_MLE(df):
     word_tags = dict()
     for i in range(len(df)):
-        curr_tags = df.loc[i, "short_ner"]
+        curr_tags = df.loc[i, "ner"]
         curr_words = df.loc[i, "tokens"]
         for j in range(len(curr_tags)):
             if curr_words[j] in word_tags.keys():
@@ -440,17 +466,38 @@ def baseline_predict(test_seq, word_tags):
     assert len(preds) == len(test_seq)
     return preds
 
+def decompose_trainX(trainX):
+    features = []
+    labels = []
+    for i in range(len(trainX)):
+        features.append(trainX[i][0])
+        labels.append(trainX[i][1])
+    return features, labels
+
+def load_glove(glove_file):
+    print("before loading glove model")
+    tmp_file = get_tmpfile("test_word2vec.txt")
+    # call glove2word2vec script
+    # default way (through CLI): python -m gensim.scripts.glove2word2vec --input <glove_file> --output <w2v_file>
+    glove2word2vec(glove_file, tmp_file)
+    print("glove model converted to word2vec format")
+    model = KeyedVectors.load_word2vec_format(tmp_file)
+    print("finished loading glove model")
+    return model
+
 if __name__ == "__main__":
     print("reading training file....")
     raw = read_data("train.txt")
     raw_withoutBIO = strip_bio(raw, "ner") # ner, pos, tokens, short_ner
-
+    raw_withoutBIO = raw_withoutBIO.drop(columns = ["short_ner"])
+    extra_data = pd.read_pickle("conll2003_combined.pkl")
+    raw_withoutBIO = pd.concat([raw_withoutBIO, extra_data], ignore_index=True)
     print("finished preprocessing, generating n-gram dictionaries.....")
     ner_bigrams = get_bigram(raw_withoutBIO, "ner")
     ner_unigrams = uniGram(raw_withoutBIO, "ner")
     ner_trigrams = get_trigram(raw_withoutBIO, "ner")
-    print("trigram misc per example is ", ner_trigrams["MISC"]["PER"])
-    print("trigram misc per example is ", ner_trigrams["MISC"])
+    # print("trigram misc per example is ", ner_trigrams["MISC"]["PER"])
+    # print("trigram misc per example is ", ner_trigrams["MISC"])
 
     word_tag, tag_counts = get_word_tag_prob(raw_withoutBIO, "ner")
 
@@ -476,16 +523,22 @@ if __name__ == "__main__":
 
     ### train maxent classifier     ###
     word_bigram = get_bigram(raw_withoutBIO, "tokens")
+    embedding = load_glove("glove.840B.300d.txt")
 
-    # f = open("classifier_10iter.pickle", "wb")
-    # trainX = get_memm_train(raw_withoutBIO, [word_bigram, ner_bigrams])
-    # maxent_classifier = MaxentClassifier.train(trainX, max_iter=10)
-    # pickle.dump(maxent_classifier , f)
-    # f.close()
+    f = open("classifier_noword.pickle", "wb")
+    trainX = get_memm_train(raw_withoutBIO, word_bigram, embedding)
+    maxent_classifier = MaxentClassifier.train(trainX, max_iter=10)
+    pickle.dump(maxent_classifier , f)
+    f.close()
+
+    # memm_features, memm_labels = decompose_trainX(trainX)
+    # print(maxent_classifier.explain(memm_features))
+    
+    
     print("classifier saved in picklefile")
 
     ### load saved classifier from pickle
-    with open("classifier_10iter.pickle", 'rb') as f:  
+    with open("classifier_noword.pickle", 'rb') as f:  
         maxent_classifier = pickle.loads(f.read())
 
 
@@ -497,5 +550,9 @@ if __name__ == "__main__":
     print(test_res)
 
     submission_dict = predict_test("memm", raw_withoutBIO, "test.txt")
-    get_submission(submission_dict, "submission_memm.txt")
-    print("current submission file is completed, saved in submission_memm.txt")
+    get_submission(submission_dict, "submission_extradata.txt")
+    print("current submission file is completed, saved in submission_extradata.txt")
+
+
+
+# 
