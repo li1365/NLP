@@ -3,9 +3,9 @@ import pandas as pd
 from nltk import ngrams
 from nltk.classify import MaxentClassifier
 import pickle
-from gensim.test.utils import datapath, get_tmpfile
-from gensim.models import KeyedVectors
-from gensim.scripts.glove2word2vec import glove2word2vec
+#from gensim.test.utils import datapath, get_tmpfile
+#from gensim.models import KeyedVectors
+#from gensim.scripts.glove2word2vec import glove2word2vec
 
 # take the txt file, return dictionary with three keys: tokens, POS tags and NER tags
 def read_data(filename):
