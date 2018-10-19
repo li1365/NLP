@@ -3,11 +3,15 @@ import pandas as pd
 from nltk import ngrams
 from nltk.classify import MaxentClassifier
 import pickle
+import category_encoders as ce
+
+from model import get_bigram
 
 from sklearn import model_selection, preprocessing, linear_model, naive_bayes, metrics, svm
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from sklearn import decomposition, ensemble
 from sklearn.ensemble import VotingClassifier
+# from sklearn import preprocessing
 
 # take the txt file, return dictionary with three keys: tokens, POS tags and NER tags
 def read_data(filename):
@@ -130,99 +134,121 @@ def concat_rows(df):
             res[col] += df.loc[i, col]
     return pd.DataFrame(res)
 
+def pos(tag):
+    one_hot = np.zeros(7)
+    if tag == 'NN' or tag == 'NNS':
+        one_hot[0] = 1
+    elif tag == 'FW':
+        one_hot[1] = 1
+    elif tag == 'NNP' or tag == 'NNPS':
+        one_hot[2] = 1
+    elif 'VB' in tag:
+        one_hot[3] = 1
+    elif tag == "init":
+        one_hot[4] = 1
+    elif tag == "last":
+        one_hot[5] = 1
+    else:
+        one_hot[6] = 1
+    return one_hot
+
+def ner(tag):
+    one_hot = np.zeros(6)
+    if tag == 'PER':
+        one_hot[0] = 1
+    elif tag == 'LOC':
+        one_hot[1] = 1
+    elif tag == "MISC":
+        one_hot[2] = 1
+    elif tag == "ORG":
+        one_hot[3] = 1
+    elif tag == "init":
+        one_hot[4] = 1
+    else:
+        one_hot[5] = 1
+    return one_hot
+
+def get_memm_train(df, bigrams, embedding, word_dict):
+    print("generating training features for MaxEntrophy Classifier")
+    word_bigram = bigrams
+    trainX = []
+    trainY = []
+    for doc_idx in range(len(df)):
+        curr_poss = df.loc[doc_idx, "pos"]
+        curr_words = df.loc[doc_idx, "tokens"]
+        curr_ner = df.loc[doc_idx, "ner"]
+        assert len(curr_poss) == len(curr_words)
+        for i in range(len(curr_poss)):
+            features = dict()
+            features["position"] = i
+            # regarding previous word
+            if i == 0:
+                features['curr_pos'] = pos(curr_poss[i])
+                features['curr_word'] = embedding[word_dict[curr_words[i].lower()]]
+                features['prev_word'] = np.zeros(300)
+                features['prev_pos'] = pos("init")
+                features['prev_ner'] = ner("init")
+            else:
+                features['curr_pos'] = pos(curr_poss[i])
+                features['prev_pos'] = pos(curr_poss[i-1])
+                features['prev_ner'] = ner(curr_ner[i-1])
+                features['curr_word'] = embedding[word_dict[curr_words[i].lower()]]
+                features['prev_word'] = embedding[word_dict[curr_words[i-1].lower()]]
+            # add in n-grams
+            if i == 0 or (curr_words[i-1] not in word_bigram.keys()) or (curr_words[i] not in word_bigram[curr_words[i-1]].keys()):
+                features["bigram"] = 0.000001
+            else:
+                features["bigram"] = word_bigram[curr_words[i-1]][curr_words[i]]
+            features["capital"] = 1 if curr_words[i][0].isupper() else -1
+            # regarding next word
+            if i == len(curr_words) -1:
+                features["next_word"] = np.ones(300)
+                features["next_pos"] = pos("last")
+            else:
+                features["next_word"] = embedding[word_dict[curr_words[i+1].lower()]]
+                features['next_pos'] = pos(curr_poss[i+1])
+            tmp_words = np.hstack((features["prev_word"], features["curr_word"], features["next_word"]))
+            tmp_words = np.hstack((tmp_words, features["curr_pos"], features["prev_pos"], features["next_pos"]))
+            tmp_words = np.hstack((tmp_words, features["prev_ner"], features["bigram"], features["capital"]))
+            trainX.append(tmp_words)
+            trainY.append(curr_ner[i])
+    print(np.array(trainX).shape)
+    print(np.array(trainY).shape)
+    return np.array(trainX), np.array(trainY)
 
 if __name__ == "__main__":
-    print("reading training file....")
     raw = read_data("train.txt")
     raw_withoutBIO = strip_bio(raw, "ner") # ner, pos, tokens, short_ner
-    raw_df = concat_rows(raw_withoutBIO)
-    raw_df = raw_df.drop('short_ner', axis=1)
+    raw_withoutBIO = raw_withoutBIO.drop(columns = ["short_ner"])
+    extra_data = pd.read_pickle("conll2003_combined.pkl")
+    raw_withoutBIO = pd.concat([raw_withoutBIO, extra_data], ignore_index=True)
 
+    ### load saved classifier from pickle
+    with open("embedding_matrix.pickle", 'rb') as f:  
+        embedding = pickle.loads(f.read())
+    with open("word_index.pickle", 'rb') as f:  
+        word_dict = pickle.loads(f.read())
 
-    words = all_tokens(raw_withoutBIO['tokens'])
-    print(len(words))
-    poss = all_tokens(raw_withoutBIO['pos'])
-    ners = all_tokens(raw_withoutBIO['ner'])
-    X = []
-    for i in range(len(words)):
-        X.append([words[i], poss[i]])
+    word_bigram = get_bigram(raw_withoutBIO, "tokens")
+    trainX, trainY = get_memm_train(raw_withoutBIO, word_bigram, embedding, word_dict)
 
     # split the dataset into training and validation datasets
-    train_x, valid_x, train_y, valid_y = model_selection.train_test_split(words, ners)
+    train_x, valid_x, train_y, valid_y = model_selection.train_test_split(trainX, trainY)
     print(train_x[:10])
     print(train_y[:10])
-    # label encode the target variable
-    print(valid_y[:20])
-    encoder = preprocessing.LabelEncoder()
-    train_y = encoder.fit_transform(train_y)
-    valid_y = encoder.fit_transform(valid_y)
-    print(valid_y[:20])
-    # create a count vectorizer object
-    count_vect = CountVectorizer(analyzer='word', tokenizer=dummy, preprocessor=dummy, token_pattern=None)
-    count_vect.fit(words)
 
-    # transform the training and validation data using count vectorizer object
-    xtrain_count =  count_vect.transform(train_x)
-    xvalid_count =  count_vect.transform(valid_x)
-
-    # word level tf-idf
-    tfidf_vect = TfidfVectorizer(analyzer='word', tokenizer=dummy, preprocessor=dummy, token_pattern=None, max_features=5000)
-    tfidf_vect.fit(words)
-    xtrain_tfidf =  tfidf_vect.transform(train_x)
-    xvalid_tfidf =  tfidf_vect.transform(valid_x)
-
-    # ngram level tf-idf
-    tfidf_vect_ngram = TfidfVectorizer(analyzer='word', tokenizer=dummy, preprocessor=dummy, token_pattern=None, ngram_range=(1,3), max_features=5000)
-    tfidf_vect_ngram.fit(words)
-    xtrain_tfidf_ngram =  tfidf_vect_ngram.transform(train_x)
-    xvalid_tfidf_ngram =  tfidf_vect_ngram.transform(valid_x)
-
-    # characters level tf-idf
-    tfidf_vect_ngram_chars = TfidfVectorizer(analyzer='word', tokenizer=dummy, preprocessor=dummy, token_pattern=None, ngram_range=(1,3), max_features=5000)
-    tfidf_vect_ngram_chars.fit(words)
-    xtrain_tfidf_ngram_chars =  tfidf_vect_ngram_chars.transform(train_x)
-    xvalid_tfidf_ngram_chars =  tfidf_vect_ngram_chars.transform(valid_x)
-
-    # # # Naive Bayes on Count Vectors
-    # accuracy = train_model(naive_bayes.MultinomialNB(), xtrain_count, train_y, xvalid_count)
-    # print("NB, Count Vectors: ", accuracy)
-    #
-    # # Naive Bayes on Word Level TF IDF Vectors
-    # accuracy = train_model(naive_bayes.MultinomialNB(), xtrain_tfidf, train_y, xvalid_tfidf)
-    # print("NB, WordLevel TF-IDF: ", accuracy)
-    #
-    # # Naive Bayes on Ngram Level TF IDF Vectors
-    # accuracy = train_model(naive_bayes.MultinomialNB(), xtrain_tfidf_ngram, train_y, xvalid_tfidf_ngram)
-    # print("NB, N-Gram Vectors: ", accuracy)
-    #
-    # # Linear Classifier on Count Vectors
-    # accuracy = train_model(linear_model.LogisticRegression(), xtrain_count, train_y, xvalid_count)
-    # print("LR, Count Vectors: ", accuracy)
-    #
-    # # Linear Classifier on Word Level TF IDF Vectors
-    # accuracy = train_model(linear_model.LogisticRegression(), xtrain_tfidf, train_y, xvalid_tfidf)
-    # print("LR, WordLevel TF-IDF: ", accuracy)
-    #
-    # # Linear Classifier on Ngram Level TF IDF Vectors
-    # accuracy = train_model(linear_model.LogisticRegression(), xtrain_tfidf_ngram, train_y, xvalid_tfidf_ngram)
-    # print("LR, N-Gram Vectors: ", accuracy)
-    #
     # SVM on Ngram Level TF IDF Vectors
-    accuracy = train_model(svm.LinearSVC(), xtrain_tfidf_ngram, train_y, xvalid_tfidf_ngram)
-    print("SVM, N-Gram Vectors: ", accuracy)
-    #
-    # # SVM on Count Vectors
-    # accuracy = train_model(svm.LinearSVC(), xtrain_count, train_y, xvalid_count)
-    # print("SVM, Count Vectors: ", accuracy)
+    accuracy = train_model(svm.LinearSVC(), train_x, train_y, valid_x)
+    print("SVM: ", accuracy)
 
     # Naive Bayes on Character Level TF IDF Vectors
-    accuracy = train_model(naive_bayes.MultinomialNB(), xtrain_tfidf_ngram_chars, train_y, xvalid_tfidf_ngram_chars)
+    accuracy = train_model(naive_bayes.MultinomialNB(), train_x, train_y, valid_x)
     print("NB, CharLevel Vectors: ", accuracy)
 
     # Linear Classifier on Character Level TF IDF Vectors
-    accuracy = train_model(linear_model.LogisticRegression(), xtrain_tfidf_ngram_chars, train_y, xvalid_tfidf_ngram_chars)
+    accuracy = train_model(linear_model.LogisticRegression(), train_x, train_y, valid_x)
     print("LR, CharLevel Vectors: ", accuracy)
 
-    submission_dict = predict_test("svm", raw_withoutBIO, "test.txt")
-    get_submission(submission_dict, "submission_svm.txt")
-    print("current submission file is completed, saved in submission_svm.txt")
+    # submission_dict = predict_test("svm", raw_withoutBIO, "test.txt")
+    # get_submission(submission_dict, "submission_svm.txt")
+    # print("current submission file is completed, saved in submission_svm.txt")
